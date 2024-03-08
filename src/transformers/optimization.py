@@ -23,6 +23,8 @@ import torch
 from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau
+from .GreedyLR import *
+
 
 from .trainer_utils import SchedulerType
 from .utils import logging
@@ -30,6 +32,21 @@ from .utils.versions import require_version
 
 
 logger = logging.get_logger(__name__)
+
+
+def get_greedy_schedule(optimizer: Optimizer, patience=10, min_lr=1e-3, smooth=False, factor=0.99 ):
+    """
+    Create a schedule with a constant learning rate, using the learning rate set in optimizer.
+
+    Args:
+        optimizer ([`~torch.optim.Optimizer`]):
+            The optimizer for which to schedule the learning rate.
+
+    Return:
+        `GreedyLR` with the appropriate schedule.
+    """
+
+    return GreedyLR(optimizer, patience=patience, min_lr=min_lr, smooth=smooth, factor=factor )
 
 
 def _get_constant_lambda(_=None):
