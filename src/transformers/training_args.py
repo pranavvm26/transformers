@@ -796,6 +796,16 @@ class TrainingArguments:
     )
     warmup_steps: int = field(default=0, metadata={"help": "Linear warmup over warmup_steps."})
 
+    patience: int = field(default=10, metadata={"help": "GreedyLR scheduler patience value"})
+    
+    smooth: bool = field(default=False, metadata={"help": "GreedyLR scheduler smoothing on/off"})
+    
+    min_lr: float = field(default=1e-3, metadata={"help": "GreedyLR scheduler min_lr value"})
+    
+    factor: float = field(default=0.95, metadata={"help": "GreedyLR/Constant step scheduler factor value"})
+    
+    critical_step: float = field(default=-1, metadata={"help": "Constant step scheduler critical step value"})
+
     log_level: Optional[str] = field(
         default="passive",
         metadata={
@@ -2673,6 +2683,11 @@ class TrainingArguments:
         max_steps: int = -1,
         warmup_ratio: float = 0,
         warmup_steps: int = 0,
+        patience: int = 10,
+        min_lr: float = 1e-5,
+        smooth: bool = True,
+        factor: float = 0.95,
+        critical_step:int=-1,
     ):
         """
         A method that regroups all arguments linked to the learning rate scheduler and its hyperparameters.
@@ -2709,6 +2724,11 @@ class TrainingArguments:
         self.max_steps = max_steps
         self.warmup_ratio = warmup_ratio
         self.warmup_steps = warmup_steps
+        self.patience = patience
+        self.smooth = smooth
+        self.min_lr = min_lr
+        self.factor = factor
+        self.critical_step = critical_step
         return self
 
     def set_dataloader(
