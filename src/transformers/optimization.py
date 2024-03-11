@@ -359,6 +359,11 @@ def get_scheduler(
     num_warmup_steps: Optional[int] = None,
     num_training_steps: Optional[int] = None,
     scheduler_specific_kwargs: Optional[dict] = None,
+    patience: Optional[int] = None,
+    min_lr: Optional[float] = None,
+    smooth: Optional[bool] = None,
+    factor: Optional[float] = None,
+    critical_step: Optional[int]=None,
 ):
     """
     Unified API to get any scheduler from its name.
@@ -382,6 +387,15 @@ def get_scheduler(
     schedule_func = TYPE_TO_SCHEDULER_FUNCTION[name]
     if name == SchedulerType.CONSTANT:
         return schedule_func(optimizer)
+    
+    # All other schedulers require `num_warmup_steps`
+    if num_warmup_steps is None and name!=SchedulerType.GREEDY and name != SchedulerType.CONSTANT_STEP:
+        raise ValueError(f"{name} requires `num_warmup_steps`, please provide that argument.")
+    
+    elif name == SchedulerType.GREEDY:
+        print(f"GreedyLR settings: patience={patience} smooth={smooth} min_lr={min_lr} factor={factor}")
+        if patience is None or min_lr is None or smooth is None:
+            raise ValueError(f"{name} requires `patience, min_lr and smooth`, please provide these arguments.")
 
     if scheduler_specific_kwargs is None:
         scheduler_specific_kwargs = {}
@@ -399,6 +413,9 @@ def get_scheduler(
     if name == SchedulerType.INVERSE_SQRT:
         return schedule_func(optimizer, num_warmup_steps=num_warmup_steps)
 
+    if name == SchedulerType.GREEDY:
+        return schedule_func(optimizer, patience=patience, min_lr=min_lr, smooth=smooth, factor=factor)
+    
     # All other schedulers require `num_training_steps`
     if num_training_steps is None:
         raise ValueError(f"{name} requires `num_training_steps`, please provide that argument.")
