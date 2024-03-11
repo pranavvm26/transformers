@@ -1174,7 +1174,7 @@ class Trainer:
             raise ValueError(f"Trainer cannot instantiate unsupported optimizer: {args.optim}")
         return optimizer_cls, optimizer_kwargs
 
-    def create_scheduler(self, num_training_steps: int, optimizer: torch.optim.Optimizer = None):
+    def create_scheduler(self, num_training_steps: int, optimizer: torch.optim.Optimizer = None, patience: int=10, factor: float=0.95, smooth:bool = True, min_lr:float = 1e-5):
         """
         Setup the scheduler. The optimizer of the trainer must have been set up either before this method is called or
         passed as an argument.
@@ -1183,13 +1183,28 @@ class Trainer:
             num_training_steps (int): The number of training steps to do.
         """
         if self.lr_scheduler is None:
-            self.lr_scheduler = get_scheduler(
-                self.args.lr_scheduler_type,
-                optimizer=self.optimizer if optimizer is None else optimizer,
-                num_warmup_steps=self.args.get_warmup_steps(num_training_steps),
-                num_training_steps=num_training_steps,
-                scheduler_specific_kwargs=self.args.lr_scheduler_kwargs,
-            )
+
+            if self.args.lr_scheduler_type == 'greedy':
+                self.lr_scheduler = get_scheduler(
+                    self.args.lr_scheduler_type,
+                    optimizer=self.optimizer if optimizer is None else optimizer,
+                    patience=self.args.patience, 
+                    smooth=self.args.smooth, 
+                    min_lr=self.args.min_lr, 
+                    factor=self.args.factor,
+                    num_warmup_steps=self.args.get_warmup_steps(num_training_steps),
+                    num_training_steps=num_training_steps,
+                    scheduler_specific_kwargs=self.args.lr_scheduler_kwargs,
+                )
+
+            else:
+                self.lr_scheduler = get_scheduler(
+                    self.args.lr_scheduler_type,
+                    optimizer=self.optimizer if optimizer is None else optimizer,
+                    num_warmup_steps=self.args.get_warmup_steps(num_training_steps),
+                    num_training_steps=num_training_steps,
+                    scheduler_specific_kwargs=self.args.lr_scheduler_kwargs,
+                )
             self._created_lr_scheduler = True
         return self.lr_scheduler
 
