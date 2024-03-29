@@ -1,4 +1,5 @@
 import os
+import sys
 import shutil
 import torch
 from accelerate import Accelerator
@@ -20,6 +21,10 @@ from datasets import load_dataset
 from random import randint
 from itertools import chain
 from functools import partial
+import sagemaker
+from sagemaker.experiments.run import Run
+from smexperiments_callback import SageMakerExperimentsCallback
+
 
 print("transformers", transformers.__version__)
 
@@ -50,7 +55,7 @@ def format_simple_cot(sample):
     return prompt
 
 
-def run():
+def run(scheduler):
     
     model_id = "tiiuae/falcon-7b"
 
@@ -77,8 +82,8 @@ def run():
     model = prepare_model_for_kbit_training(model)
     
     config = LoraConfig(
-        r=512,
-        lora_alpha=2048,
+        r=1536,
+        lora_alpha=3584,
         target_modules=[
             "query_key_value",
             "dense",
@@ -93,9 +98,9 @@ def run():
     model = get_peft_model(model, config)
     print_trainable_parameters(model)
     
-    train_dataset = load_dataset(dataset_name, split="train[:30000]")
-    validation_dataset = load_dataset(dataset_name, split="train[30000:30500]")
-    test_dataset = load_dataset(dataset_name, split="train[30500:31000]")
+    train_dataset = load_dataset(dataset_name, split="train[:11000]")
+    validation_dataset = load_dataset(dataset_name, split="train[11000:11100]")
+    test_dataset = load_dataset(dataset_name, split="train[11100:11200]")
     
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Validation dataset size: {len(validation_dataset)}")
@@ -171,71 +176,103 @@ def run():
     print(f"Train Length : {len(lm_train_dataset)} || Val Length : {len(lm_valid_dataset)} || Test Length : {len(lm_test_dataset)}")
     
     lr_schedulers = ['cosine', 'constant', 'greedy', 'linear']
-    chosen_scheduler = -2
+    chosen_scheduler = lr_schedulers.index(scheduler)
     
-    logging_dir = f"./model-outputs/{lr_schedulers[chosen_scheduler]}/tensorboard"
-    output_dir = f"./model-outputs/{lr_schedulers[chosen_scheduler]}/output"
-    temp_dir = f"./model-outputs/{lr_schedulers[chosen_scheduler]}/temp-model-dir"
-    model_dir = f"./model-outputs/{lr_schedulers[chosen_scheduler]}/fine-tuned-model-dir"
+    with Run(
+        experiment_name="GreedyLr-Experimentation", 
+        run_name=f"run-{scheduler}", 
+        sagemaker_session=sagemaker.Session()
+    ) as run:
+    
+        logging_dir = f"./model-outputs/script/{lr_schedulers[chosen_scheduler]}/tensorboard"
+        output_dir = f"./model-outputs/script/{lr_schedulers[chosen_scheduler]}/output"
+        temp_dir = f"./model-outputs/script/{lr_schedulers[chosen_scheduler]}/peft-model-dir"
+        # model_dir = f"./model-outputs/{lr_schedulers[chosen_scheduler]}/fine-tuned-model-dir"
 
-    
-    trainer = transformers.Trainer(
-        model=model,
-        train_dataset=lm_train_dataset,
-        eval_dataset=lm_valid_dataset,
-        args=transformers.TrainingArguments(
+        run.log_parameters(
+            {
+                "exp_current_scheduler": lr_schedulers[chosen_scheduler],
+                "exp_logging_dir": logging_dir,
+                "exp_output_dir": output_dir,
+                "exp_peft_dir": temp_dir
+            }
+        ) 
+        
+        train_args = transformers.TrainingArguments(
             per_device_train_batch_size=4,
             per_device_eval_batch_size=4,
             logging_dir=logging_dir,
             logging_steps=2,
             num_train_epochs=3,
-            learning_rate=1e-5,
+            learning_rate=1e-4,
             bf16=False,
             save_strategy="no",
             output_dir=output_dir,
             report_to="tensorboard",
             lr_scheduler_type=lr_schedulers[chosen_scheduler],
-            # warmup_ratio=0.05, #for cosine
-            factor=0.9 # for greedylr
-        ),
-        data_collator=transformers.DataCollatorForLanguageModeling(
-            tokenizer, 
-            mlm=False
+            # # greedy
+            # min_lr=1e-6,
+            # smooth=True,
+            # factor=0.9
+            # cosine
+            warmup_ratio=0.05
         )
-    )
-    model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
+        
+        
+        trainer = transformers.Trainer(
+            model=model,
+            train_dataset=lm_train_dataset,
+            eval_dataset=lm_valid_dataset,
+            args=train_args,
+            callbacks=[SageMakerExperimentsCallback(region="us-east-1")],
+            data_collator=transformers.DataCollatorForLanguageModeling(
+                tokenizer, 
+                mlm=False
+            )
+        )
+        model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
+
+        trainer.train()
+
+        trainer.model.save_pretrained(
+            temp_dir, 
+            safe_serialization=False
+        )
+
+        del model
+        del trainer
+        torch.cuda.empty_cache()
     
-    trainer.train()
     
-    trainer.model.save_pretrained(
-        temp_dir, 
-        safe_serialization=False
-    )
     
-    del model
-    del trainer
-    torch.cuda.empty_cache()
+    #     model = AutoPeftModelForCausalLM.from_pretrained(
+    #         temp_dir,
+    #         # low_cpu_mem_usage=True,
+    #         device_map="auto",
+    #         torch_dtype=torch.float16,
+    #     )
+    #     model = model.merge_and_unload()
+
+    #     model.save_pretrained(
+    #         model_dir, 
+    #         safe_serialization=True, 
+    #         max_shard_size="9GB"
+    #     )
+    #     tokenizer.save_pretrained(
+    #         save_directory=model_dir, 
+    #         from_pt=True
+    #     )
+
+    #     shutil.rmtree(temp_dir)
     
-    model = AutoPeftModelForCausalLM.from_pretrained(
-        temp_dir,
-        # low_cpu_mem_usage=True,
-        device_map="auto",
-        torch_dtype=torch.float16,
-    )
-    model = model.merge_and_unload()
-    
-    model.save_pretrained(
-        model_dir, 
-        safe_serialization=True, 
-        max_shard_size="9GB"
-    )
-    tokenizer.save_pretrained(
-        save_directory=model_dir, 
-        from_pt=True
-    )
-    
-    shutil.rmtree(temp_dir)
+    return 0
+
+
 
 if __name__ == "__main__":
-    print(f"running training...")
-    run()
+    _scheduler = sys.argv[1]
+    print("************************************")
+    print(f"Running training with {_scheduler}")
+    print("************************************")
+    print("\n")
+    run(scheduler=_scheduler)
