@@ -1,0 +1,27 @@
+{
+    "dataset": {
+        "name": "w601sxs/simpleCoT",
+        "train": "train[:6000]",
+        "valid": "train[6000:6100]",
+        "test": "train[6100:6200]"
+    },
+    "base_train_args": {
+        "per_device_train_batch_size": 4,
+        "per_device_eval_batch_size": 1,
+        "logging_steps": 2,
+        "num_train_epochs": 1,
+        "learning_rate": 0.000185,
+        "bf16": "False",
+        "save_strategy": "no",
+        "report_to": "tensorboard"
+    },
+    "peft_ranges": {
+        "r_alpha_values": [
+            16,
+            32,
+            256,
+            512
+        ]
+    },
+    "schedulers": "cosine$warmup_ratio:0.05,eta_min:1.85e-5|greedy$min_lr:1.85e-05,smooth:True,factor:0.9"
+}

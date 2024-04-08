@@ -1,5 +1,9 @@
 import os
+import gc
 import sys
+import time
+from datetime import datetime
+import argparse
 import shutil
 import torch
 from accelerate import Accelerator
@@ -25,11 +29,56 @@ import sagemaker
 from sagemaker.experiments.run import Run
 from smexperiments_callback import SageMakerExperimentsCallback
 
+transformers.set_seed(9)
+
 
 print("transformers", transformers.__version__)
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 
-dataset_name = "w601sxs/simpleCoT"
+
+def parse_opt_args(opt_string):
+    params = opt_string.split('|')
+    
+    params_dict = {}
+    for param in params:
+        _key, values = param.split('$')
+        params_dict[_key] = {v.split(':')[0]: eval(v.split(':')[1]) for v in values.split(',')}
+        
+    return params_dict
+
+
+def parse_args():
+    # Create the parser
+    parser = argparse.ArgumentParser(description="Greedy LR Testing")
+
+    # dataset
+    parser.add_argument("--dataset_name", type=str)
+    parser.add_argument("--train", type=str)
+    parser.add_argument("--valid", type=str)
+    parser.add_argument("--test", type=str)
+    
+    # train args
+    parser.add_argument("--per_device_train_batch_size", type=int)
+    parser.add_argument("--per_device_eval_batch_size", type=int)
+    parser.add_argument("--logging_dir", type=str)
+    parser.add_argument("--logging_steps", type=int)
+    parser.add_argument("--num_train_epochs", type=int)
+    parser.add_argument("--learning_rate", type=float)
+    parser.add_argument("--bf16", type=bool)
+    parser.add_argument("--save_strategy", type=str)
+    
+    # peft
+    parser.add_argument("--peft_rvalue", type=int)
+    parser.add_argument("--scheduler", type=str)
+    parser.add_argument("--scheduler_args", type=str)
+    
+
+    # Parse the arguments
+    args = parser.parse_args()
+
+    return args
+
 
 def print_trainable_parameters(model):
     """
@@ -55,9 +104,12 @@ def format_simple_cot(sample):
     return prompt
 
 
-def run(scheduler):
+def run(_args):
+    
+    accelerator = Accelerator()
     
     model_id = "tiiuae/falcon-7b"
+    
 
     # bnb_config = BitsAndBytesConfig(
     #     load_in_8bit=True,
@@ -82,15 +134,15 @@ def run(scheduler):
     model = prepare_model_for_kbit_training(model)
     
     config = LoraConfig(
-        r=1536,
-        lora_alpha=3584,
+        r=int(_args.peft_rvalue),
+        lora_alpha=int(_args.peft_rvalue * 2),
         target_modules=[
             "query_key_value",
             "dense",
             "dense_h_to_4h",
             "dense_4h_to_h",
         ],
-        lora_dropout=0.1,
+        lora_dropout=0.08,
         bias="none",
         task_type="CAUSAL_LM"
     )
@@ -98,9 +150,9 @@ def run(scheduler):
     model = get_peft_model(model, config)
     print_trainable_parameters(model)
     
-    train_dataset = load_dataset(dataset_name, split="train[:11000]")
-    validation_dataset = load_dataset(dataset_name, split="train[11000:11100]")
-    test_dataset = load_dataset(dataset_name, split="train[11100:11200]")
+    train_dataset = load_dataset(_args.dataset_name, split=_args.train)
+    validation_dataset = load_dataset(_args.dataset_name, split=_args.valid)
+    test_dataset = load_dataset(_args.dataset_name, split=_args.test)
     
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Validation dataset size: {len(validation_dataset)}")
@@ -175,61 +227,88 @@ def run(scheduler):
     # Print total number of samples
     print(f"Train Length : {len(lm_train_dataset)} || Val Length : {len(lm_valid_dataset)} || Test Length : {len(lm_test_dataset)}")
     
-    lr_schedulers = ['cosine', 'constant', 'greedy', 'linear']
-    chosen_scheduler = lr_schedulers.index(scheduler)
+    chosen_scheduler = _args.scheduler
+    
+    run_name = f"run-{_args.scheduler}-r{_args.peft_rvalue}a{int(2*_args.peft_rvalue)}-{datetime.now().strftime('%Y%m%d%H%M')}"
+    exp_name = f"GreedyLr-seed9-{datetime.now().strftime('%Y%m%d%H%M')}"
     
     with Run(
-        experiment_name="GreedyLr-Experimentation", 
-        run_name=f"run-{scheduler}", 
+        experiment_name=exp_name, 
+        run_name=run_name, 
         sagemaker_session=sagemaker.Session()
     ) as run:
     
-        logging_dir = f"./model-outputs/script/{lr_schedulers[chosen_scheduler]}/tensorboard"
-        output_dir = f"./model-outputs/script/{lr_schedulers[chosen_scheduler]}/output"
-        temp_dir = f"./model-outputs/script/{lr_schedulers[chosen_scheduler]}/peft-model-dir"
+        logging_dir = f"./logs/{exp_name}/{run_name}/tensorboard"
+        output_dir = f"./logs/{exp_name}/{run_name}/output"
+        temp_dir = f"./logs/{exp_name}/{run_name}/peft-model-dir"
         # model_dir = f"./model-outputs/{lr_schedulers[chosen_scheduler]}/fine-tuned-model-dir"
 
         run.log_parameters(
             {
-                "exp_current_scheduler": lr_schedulers[chosen_scheduler],
+                "exp_current_scheduler": chosen_scheduler,
                 "exp_logging_dir": logging_dir,
                 "exp_output_dir": output_dir,
                 "exp_peft_dir": temp_dir
             }
         ) 
         
-        train_args = transformers.TrainingArguments(
-            per_device_train_batch_size=4,
-            per_device_eval_batch_size=4,
-            logging_dir=logging_dir,
-            logging_steps=2,
-            num_train_epochs=3,
-            learning_rate=1e-4,
-            bf16=False,
-            save_strategy="no",
-            output_dir=output_dir,
-            report_to="tensorboard",
-            lr_scheduler_type=lr_schedulers[chosen_scheduler],
-            # # greedy
-            # min_lr=1e-6,
-            # smooth=True,
-            # factor=0.9
-            # cosine
-            warmup_ratio=0.05
-        )
+        sch_dict = parse_opt_args(_args.scheduler_args)
+        print(_args.scheduler, "=======>", sch_dict[_args.scheduler])
         
-        
-        trainer = transformers.Trainer(
+      
+        if _args.scheduler == "greedy":
+            
+            # print(_args.scheduler, "GREEDY =======>", sch_dict[_args.scheduler])
+            train_args = transformers.TrainingArguments(
+                per_device_train_batch_size=_args.per_device_train_batch_size,
+                per_device_eval_batch_size=_args.per_device_eval_batch_size,
+                logging_dir=_args.logging_dir,
+                logging_steps=2,
+                num_train_epochs=_args.num_train_epochs,
+                learning_rate=_args.learning_rate,
+                bf16=False,
+                save_strategy=_args.save_strategy,
+                output_dir=output_dir,
+                report_to="tensorboard",
+                lr_scheduler_type=_args.scheduler,
+                # greedy
+                min_lr=sch_dict[_args.scheduler]['min_lr'],
+                smooth=sch_dict[_args.scheduler]['smooth'],
+                factor=sch_dict[_args.scheduler]['factor']
+            )
+            
+        elif _args.scheduler == "cosine":
+            # print(_args.scheduler, "COSINE=======>", sch_dict[_args.scheduler])
+            
+            train_args = transformers.TrainingArguments(
+                per_device_train_batch_size=_args.per_device_train_batch_size,
+                per_device_eval_batch_size=_args.per_device_eval_batch_size,
+                logging_dir=_args.logging_dir,
+                logging_steps=2,
+                num_train_epochs=_args.num_train_epochs,
+                learning_rate=_args.learning_rate,
+                bf16=False,
+                save_strategy=_args.save_strategy,
+                output_dir=output_dir,
+                report_to="tensorboard",
+                lr_scheduler_type=_args.scheduler,
+                # cosine
+                warmup_ratio=sch_dict[_args.scheduler]['warmup_ratio'],
+                eta_min=sch_dict[_args.scheduler]['eta_min']
+            )
+
+            
+        trainer = accelerator.prepare(transformers.Trainer(
             model=model,
             train_dataset=lm_train_dataset,
             eval_dataset=lm_valid_dataset,
             args=train_args,
             callbacks=[SageMakerExperimentsCallback(region="us-east-1")],
             data_collator=transformers.DataCollatorForLanguageModeling(
-                tokenizer, 
+                tokenizer,
                 mlm=False
             )
-        )
+        ))
         model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
 
         trainer.train()
@@ -238,10 +317,18 @@ def run(scheduler):
             temp_dir, 
             safe_serialization=False
         )
+        
+        print('moving model to CPU')
+        model.to('cpu')
 
         del model
         del trainer
         torch.cuda.empty_cache()
+        gc.collect()
+        
+        print("sleep...")
+        time.sleep(2)
+        print("continue!")
     
     
     
@@ -270,9 +357,11 @@ def run(scheduler):
 
 
 if __name__ == "__main__":
-    _scheduler = sys.argv[1]
+    args = parse_args()
+    
     print("************************************")
-    print(f"Running training with {_scheduler}")
+    print(f"Running training with {args}")
     print("************************************")
     print("\n")
-    run(scheduler=_scheduler)
+    
+    run(args)
